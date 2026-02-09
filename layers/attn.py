@@ -103,8 +103,56 @@ class MHA:
 
         return max(attn_core_time, kv_load_time)
 
-    def prefill_attn_others(self, seq_len, device_type):
-        return self.decode_attn_others(seq_len, device_type)
+    def prefill_attn_others(self, bs, device_type):
+        q_down_proj = get_gemm_mfu_and_latency(
+            m=bs,
+            k=self.config.hidden_size,
+            n=self.config.q_lora_rank,
+            device_type=device_type,
+            use_fp8_gemm=self.use_fp8_gemm,
+        )
+        print("{:<40} {:<10.2f}".format("Q_down_proj latency (us):", q_down_proj * 1e6))
+
+        q_up_proj = get_gemm_mfu_and_latency(
+            m=bs,
+            k=self.config.q_lora_rank,
+            n=self.config.num_attention_heads * self.config.qk_head_dim,
+            device_type=device_type,
+            use_fp8_gemm=self.use_fp8_gemm,
+        )
+        print("{:<40} {:<10.2f}".format("Q_up_proj latency (us):", q_up_proj * 1e6))
+
+        kv_down_proj = get_gemm_mfu_and_latency(
+            m=bs,
+            k=self.config.hidden_size,
+            n=self.config.kv_lora_rank + self.config.qk_rope_head_dim,
+            device_type=device_type,
+            use_fp8_gemm=self.use_fp8_gemm,
+        )
+        print(
+            "{:<40} {:<10.2f}".format("KV_down_proj latency (us):", kv_down_proj * 1e6)
+        )
+
+        kv_up_proj = get_gemm_mfu_and_latency(
+            m=bs,
+            k=self.config.kv_lora_rank,
+            n=self.config.num_attention_heads * (self.config.v_head_dim + self.config.qk_nope_head_dim),
+            device_type=device_type,
+            use_fp8_gemm=self.use_fp8_gemm,
+        )
+
+        print("{:<40} {:<10.2f}".format("kv_up_proj latency (us):", kv_up_proj * 1e6))
+
+        o_proj = get_gemm_mfu_and_latency(
+            m=bs,
+            k=self.config.num_attention_heads * self.config.v_head_dim,
+            n=self.config.hidden_size,
+            device_type=device_type,
+            use_fp8_gemm=self.use_fp8_gemm,
+        )
+        print("{:<40} {:<10.2f}".format("o_proj latency (us):", o_proj * 1e6))
+
+        return q_down_proj + q_up_proj + kv_down_proj + kv_up_proj + o_proj
 
 
 class MLA(MHA):
