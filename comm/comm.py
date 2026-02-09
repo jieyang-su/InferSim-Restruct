@@ -35,7 +35,8 @@ class Comm:
 
     def dispatch(self, num_tokens, mode="normal"):
         if mode == "normal":
-            send_tokens = num_tokens * (self.num_nodes - 1)
+            temp_num_nodes = min(self.num_nodes, 4)
+            send_tokens = num_tokens * (temp_num_nodes - 1)
             tensor_shape1 = [send_tokens, self.config.hidden_size]
             t1 = self.size_bw_model(tensor_shape1, use_fp8=True, inter_node=True)
 
@@ -51,7 +52,8 @@ class Comm:
 
     def combine(self, num_tokens, mode="normal"):
         if mode == "normal":
-            rcv_tokens = num_tokens * (self.num_nodes - 1)
+            temp_num_nodes = min(self.num_nodes, 4)
+            rcv_tokens = num_tokens * (temp_num_nodes - 1)
             tensor_shape1 = [rcv_tokens, self.config.hidden_size]
             t1 = self.size_bw_model(tensor_shape1, use_fp8=False, inter_node=True)
 
