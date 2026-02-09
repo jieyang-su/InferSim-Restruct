@@ -99,8 +99,8 @@ class MoE:
                     (shared_expert_up_proj + shared_expert_down_proj) * 1e6,
                 )
             )
-            t += (shared_expert_up_proj + shared_expert_down_proj) * self.config.num_hidden_layers
-        return t
+            s_t = (shared_expert_up_proj + shared_expert_down_proj) * self.config.num_hidden_layers
+        return t, s_t
 
     def prefill_moe(self, seq_len, device_type, num_gpus):
         gpu = gpu_map[device_type]
@@ -193,5 +193,5 @@ class MoE:
                     (shared_expert_up_proj + shared_expert_down_proj) * 1e6,
                 )
             )
-            t += (shared_expert_up_proj + shared_expert_down_proj) * self.config.num_hidden_layers
-        return t
+            s_t = (shared_expert_up_proj + shared_expert_down_proj) * self.config.num_hidden_layers
+        return t, s_t

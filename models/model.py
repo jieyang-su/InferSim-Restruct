@@ -141,7 +141,7 @@ class Model:
         attn_core_time *= math.ceil(self.args.max_prefill_tokens / self.args.target_isl)
 
         moe = MoE(self.config, self.args.use_fp8_gemm)
-        moe_time = moe.prefill_moe(
+        moe_time, shared_expert_time = moe.prefill_moe(
             self.args.max_prefill_tokens, self.args.device_type, self.args.world_size
         )
 
@@ -166,14 +166,14 @@ class Model:
                 (attn_core_time + attn_other_time) / self.args.sm_ratio, comm_time2
             )
             ttft *= self.config.num_hidden_layers
-            ttft += max(moe_time / self.args.sm_ratio, comm_time1 * self.config.num_hidden_layers)
-            ttft += max(moe_time / self.args.sm_ratio, comm_time2 * self.config.num_hidden_layers)
+            ttft += max((moe_time + shared_expert_time) / self.args.sm_ratio, comm_time1 * self.config.num_hidden_layers)
+            ttft += max((moe_time + shared_expert_time) / self.args.sm_ratio, comm_time2 * self.config.num_hidden_layers)
         else:
             ttft = attn_core_time
             ttft += attn_other_time
             ttft += comm_time1 + comm_time2
             ttft *= self.config.num_hidden_layers
-            ttft += moe_time
+            ttft += moe_time + shared_expert_time
         ttft *= 1000  # convert to ms
         ttft += 30  # for scheduler
 
@@ -198,7 +198,7 @@ class Model:
         attn_other_time = attn.decode_attn_others(self.target_bs, self.args.device_type)
 
         moe = MoE(self.config, self.args.use_fp8_gemm)
-        moe_time = moe.decode_moe(
+        moe_time, shared_expert_time = moe.decode_moe(
             self.target_bs, self.args.device_type, self.args.world_size
         )
 
@@ -220,16 +220,14 @@ class Model:
             temp_attn_other_time = attn_other_time * self.config.num_hidden_layers
             temp_comm_time1 = comm_time1 * self.config.num_hidden_layers
             temp_comm_time2 = comm_time2 * self.config.num_hidden_layers
-            tpot = max(
-                temp_attn_core_time + temp_attn_other_time, moe_time + temp_comm_time1 + temp_comm_time2
-            )
+            tpot = max(temp_attn_other_time + shared_expert_time, temp_comm_time1) + max(temp_comm_time2, temp_attn_core_time + moe_time)
             tpot *= 2
         else:
             tpot = attn_core_time
             tpot += attn_other_time
             tpot += comm_time1 + comm_time2
             tpot *= self.config.num_hidden_layers
-            tpot += moe_time
+            tpot += moe_time + shared_expert_time
         tpot *= 1000  # convert to ms
         tpot += 5  # for scheduler
 
