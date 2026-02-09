@@ -10,6 +10,8 @@ class ModelConfig:
         with open(config_path, "r") as f:
             d = json.load(f)
 
+        self.modelPrefix = d["architectures"][0][:10]
+
         self.hidden_size = d["hidden_size"]
         self.num_hidden_layers = d["num_hidden_layers"]
 
@@ -63,7 +65,13 @@ class ModelConfig:
             self.num_experts_per_tok = d["num_experts_per_tok"]
             self.intermediate_size = d["moe_intermediate_size"]
             self.num_shared_experts = d.get("num_shared_experts", 0)
+            if (self.modelPrefix=="DeepseekV3"):
+                self.intermediate_size_ffn = d["intermediate_size"]
+                self.ffn_layers = 3
+                self.moe_layers = 58
         else:
             self.num_experts_per_tok = 1
             self.intermediate_size = d["intermediate_size"]
             self.num_shared_experts = 0
+            self.ffn_layers = None
+            self.moe_layers = None

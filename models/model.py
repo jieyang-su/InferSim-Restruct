@@ -165,14 +165,15 @@ class Model:
             ttft += max(
                 (attn_core_time + attn_other_time) / self.args.sm_ratio, comm_time2
             )
-            ttft += max(moe_time / self.args.sm_ratio, comm_time1)
-            ttft += max(moe_time / self.args.sm_ratio, comm_time2)
+            ttft *= self.config.num_hidden_layers
+            ttft += max(moe_time / self.args.sm_ratio, comm_time1 * self.config.num_hidden_layers)
+            ttft += max(moe_time / self.args.sm_ratio, comm_time2 * self.config.num_hidden_layers)
         else:
             ttft = attn_core_time
-            ttft += moe_time
             ttft += attn_other_time
             ttft += comm_time1 + comm_time2
-        ttft *= self.config.num_hidden_layers
+            ttft *= self.config.num_hidden_layers
+            ttft += moe_time
         ttft *= 1000  # convert to ms
         ttft += 30  # for scheduler
 
@@ -215,16 +216,20 @@ class Model:
         num_tokens = self.target_bs
         if self.args.enable_tbo:
             num_tokens *= 2
+            temp_attn_core_time = attn_core_time  * self.config.num_hidden_layers
+            temp_attn_other_time = attn_other_time * self.config.num_hidden_layers
+            temp_comm_time1 = comm_time1 * self.config.num_hidden_layers
+            temp_comm_time2 = comm_time2 * self.config.num_hidden_layers
             tpot = max(
-                attn_core_time + attn_other_time, moe_time + comm_time1 + comm_time2
+                temp_attn_core_time + temp_attn_other_time, moe_time + temp_comm_time1 + temp_comm_time2
             )
             tpot *= 2
         else:
             tpot = attn_core_time
             tpot += attn_other_time
-            tpot += moe_time
             tpot += comm_time1 + comm_time2
-        tpot *= self.config.num_hidden_layers
+            tpot *= self.config.num_hidden_layers
+            tpot += moe_time
         tpot *= 1000  # convert to ms
         tpot += 5  # for scheduler
 
