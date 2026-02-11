@@ -4,6 +4,89 @@ import os
 from hardware.gpu import gpu_map
 
 
+def get_indexer_decode_mfu(config, target_bs, kv_len, device_type, next_n = 1):
+    gpu = gpu_map[device_type]
+
+    file_name = f"bench_data/dsa/decode/{device_type.lower()}/logits-64-128.csv"
+
+    if not os.path.exists(file_name):
+        print(f"warning: {file_name} not exists")
+        return gpu.mfu
+
+    rows = list()
+    with open(file_name, "r") as f:
+        reader = csv.reader(f)
+        next(reader)
+        for row in reader:
+            if row[1] != next_n:
+                continue
+            rows.append(row)
+
+    mfu_bs = 1
+    for row in rows:
+        bs = int(row[0])
+        if bs <= target_bs:
+            mfu_bs = bs
+        else:
+            break
+
+    mfu_kv_len = 1
+    for row in rows:
+        kv_l = int(row[2])
+        if kv_l <= kv_len:
+            mfu_kv_len = kv_l
+        else:
+            break
+
+    mfu = gpu.mfu
+    for row in rows:
+        bs = int(row[0])
+        kv_l = int(row[2])
+        if bs == mfu_bs and kv_l == mfu_kv_len:
+            mfu = float(row[4])
+
+    return round(mfu, 3)
+
+def get_indexer_prefill_mfu(config, seq_len, device_type):
+    gpu = gpu_map[device_type]
+    
+    file_name = f"bench_data/dsa/prefill/{device_type.lower()}/logits-64-128.csv"
+
+    if not os.path.exists(file_name):
+        print(f"warning: {file_name} not exists")
+        return gpu.mfu
+
+    rows = list()
+    with open(file_name, "r") as f:
+        reader = csv.reader(f)
+        next(reader)
+        for row in reader:
+            rows.append(row)
+    mfu_q_len = 1
+    for row in rows:
+        q_l = int(row[0])
+        if q_l <= seq_len:
+            mfu_q_len = q_l
+        else:
+            break
+
+    mfu_kv_len = 1
+    for row in rows:
+        kv_l = int(row[1])
+        if kv_l <= seq_len:
+            mfu_kv_len = kv_l
+        else:
+            break
+
+    mfu = gpu.mfu
+    for row in rows:
+        q_l = int(row[0])
+        kv_l = int(row[1])
+        if q_l == mfu_q_len and kv_l == mfu_kv_len:
+            mfu = float(row[3])
+
+    return round(mfu, 3)
+
 def get_attn_decode_mfu(config, target_bs, kv_len, device_type, use_fp8_kv):
     gpu = gpu_map[device_type]
     if config.attn_type == "MHA/GQA":

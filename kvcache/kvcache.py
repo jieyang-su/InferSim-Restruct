@@ -18,11 +18,21 @@ def get_mla_kvcache_size(config: ModelConfig, use_fp8):
         kvcache_size *= 2
     return kvcache_size
 
+def get_dsa_indexer_kvcache_size(config: ModelConfig, use_fp8):
+    #default fp8
+    kvcache_size = config.num_hidden_layers * (
+        1 + config.index_head_dim
+    )
+    return kvcache_size
 
-def get_kvcache_size(config: ModelConfig, use_fp8):
+
+# interface 入口
+def get_kvcache_size(config: ModelConfig, use_fp8, is_indexer):
     if config.attn_type == "MHA/GQA":
         return get_mha_kvcache_size(config, use_fp8)
     elif config.attn_type == "MLA":
+        if is_indexer:
+            return get_dsa_indexer_kvcache_size(config, use_fp8)
         return get_mla_kvcache_size(config, use_fp8)
 
 

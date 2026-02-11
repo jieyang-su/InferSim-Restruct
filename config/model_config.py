@@ -9,9 +9,9 @@ class ModelConfig:
         d = dict()
         with open(config_path, "r") as f:
             d = json.load(f)
-
+        
         self.modelPrefix = d["architectures"][0][:10]
-
+        self.modelName = d["architectures"][0]
         self.hidden_size = d["hidden_size"]
         self.num_hidden_layers = d["num_hidden_layers"]
 
@@ -28,6 +28,13 @@ class ModelConfig:
             self.linear_num_key_heads = d["linear_num_key_heads"]
             self.linear_value_head_dim = d["linear_value_head_dim"]
             self.linear_num_value_heads = d["linear_num_value_heads"]
+        
+        if d["architectures"][0] == "DeepseekV32ForCausalLM":
+            self.index_head_dim = d["index_head_dim"]
+            self.index_n_heads = d["index_n_heads"]
+            self.index_topk = d["index_topk"]
+            self.logits_dim = 4096
+
 
         self.attn_type = "MHA/GQA"
         if "kv_lora_rank" in d:
@@ -57,6 +64,8 @@ class ModelConfig:
             self.num_routed_experts = d["num_routed_experts"]
         elif "num_experts" in d:
             self.num_routed_experts = d["num_experts"]
+        elif "n_routed_experts" in d:
+            self.num_routed_experts = d["n_routed_experts"]
         else:
             self.is_moe = False
             self.num_routed_experts = 1
@@ -65,6 +74,8 @@ class ModelConfig:
             self.num_experts_per_tok = d["num_experts_per_tok"]
             self.intermediate_size = d["moe_intermediate_size"]
             self.num_shared_experts = d.get("num_shared_experts", 0)
+            if (self.num_shared_experts == 0 ):
+                self.num_shared_experts = d.get("n_shared_experts", 0)
             if (self.modelPrefix=="DeepseekV3"):
                 self.intermediate_size_ffn = d["intermediate_size"]
                 self.ffn_layers = 3

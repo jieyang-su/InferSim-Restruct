@@ -4,30 +4,41 @@ from config.model_config import ModelConfig
 def gemm_flops(m, n, k):
     return 2.0 * m * n * k
 
+def gemm_flops_fp8(m, n, k):
+    return  m * n * k
+
 
 def get_mha_gflops(config, bs, avg_context_len):
+    # Q 投影： [bs, hidden] x [hidden, num_heads*head_dim]
     q_proj = gemm_flops(
         bs, config.hidden_size, config.num_attention_heads * config.head_dim
     )
+    # K 投影： [bs, hidden] x [hidden, num_kv_heads*head_dim]
     k_proj = gemm_flops(
         bs, config.hidden_size, config.num_key_value_heads * config.head_dim
     )
+    # V 投影： [bs, hidden] x [hidden, num_kv_heads*head_dim]
     v_proj = gemm_flops(
         bs, config.hidden_size, config.num_key_value_heads * config.head_dim
     )
+    # O 投影： [bs, num_heads*head_dim] x [num_heads*head_dim, hidden]
     o_proj = gemm_flops(
         bs, config.num_attention_heads * config.head_dim, config.hidden_size
     )
+    # attention 核心：
+    # 1) QK^T：形状近似 [bs, num_heads*head_dim] x [num_heads*head_dim, ctx]
+    # 2) P*V：形状近似 [bs, ctx] x [ctx, num_heads*head_dim]
     attn_core = gemm_flops(
         bs, config.num_attention_heads * config.head_dim, avg_context_len
     ) + gemm_flops(bs, avg_context_len, config.num_attention_heads * config.head_dim)
+    # /1e9 转成 GFLOPs
     return attn_core / 1e9, (q_proj + k_proj + v_proj + o_proj) / 1e9
 
 
 def get_mla_absorb_gflops(config, bs, avg_context_len):
     q_down_proj = gemm_flops(bs, config.hidden_size, config.q_lora_rank)
     q_up_proj = gemm_flops(
-        bs, config.q_lora_rank, config.num_attention_heads * config.qk_head_dim
+        bs, config.q_lora_rank, config.num_attention_heads * config.qk_head_dim 
     )
 
     kv_down_proj = gemm_flops(

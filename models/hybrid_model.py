@@ -185,7 +185,7 @@ class HybridModel:
 
         # moe
         moe = MoE(self.config, self.args.use_fp8_gemm)
-        t_moe = moe.prefill_moe(
+        t_moe, t_shared_expert = moe.prefill_moe(
             self.args.max_prefill_tokens, self.args.device_type, self.args.world_size
         )
 
@@ -207,7 +207,7 @@ class HybridModel:
         ttft += (
             t_linear_attn_core + t_linear_attn_others
         ) * self.config.num_linear_attn_layers
-        ttft += (t_moe + comm_t1 + comm_t2) * self.config.num_hidden_layers
+        ttft += (comm_t1 + comm_t2) * self.config.num_hidden_layers + t_moe + t_shared_expert
         ttft *= 1000  # convert to ms
         ttft += 30  # for scheduler
 
@@ -244,7 +244,7 @@ class HybridModel:
         )
 
         moe = MoE(self.config, self.args.use_fp8_gemm)
-        t_moe = moe.decode_moe(
+        t_moe, t_shared_expert = moe.decode_moe(
             self.target_bs, self.args.device_type, self.args.world_size
         )
 
@@ -266,7 +266,7 @@ class HybridModel:
         tpot += (
             t_linear_attn_core + t_linear_attn_others
         ) * self.config.num_linear_attn_layers
-        tpot += (t_moe + comm_t1 + comm_t2) * self.config.num_hidden_layers
+        tpot += (comm_t1 + comm_t2) * self.config.num_hidden_layers + t_moe + t_shared_expert
         tpot *= 1000  # convert to ms
         tpot += 5  # for scheduler
 

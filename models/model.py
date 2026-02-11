@@ -57,7 +57,12 @@ class Model:
         target_kvcache_bytes = (
             self.kvcache_mem * 1024 * 1024 * 1024 / target_bs / context_len
         )
-        kvcache_bytes = get_kvcache_size(self.config, self.args.use_fp8_kv)
+        is_indexer = False
+        kvcache_bytes = get_kvcache_size(self.config, self.args.use_fp8_kv, is_indexer)
+        indexer_kvcache_bytes = 0
+        if (self.config.modelName == "DeepseekV32ForCausalLM"):
+            is_indexer = True
+            indexer_kvcache_bytes = get_kvcache_size(self.config, self.args.use_fp8_kv, is_indexer)
         print(
             "{:<40} {:<10.2f}".format(
                 "Target per-token KV cache size (KB):", target_kvcache_bytes / 1024
@@ -65,12 +70,13 @@ class Model:
         )
         print(
             "{:<40} {:<10.2f}".format(
-                "Current per-token KV cache size (KB):", kvcache_bytes / 1024
+                "Current per-token KV cache size (KB):", (kvcache_bytes + indexer_kvcache_bytes) / 1024
             )
         )
-        if kvcache_bytes > target_kvcache_bytes:
+        if (kvcache_bytes+ indexer_kvcache_bytes) > target_kvcache_bytes:
             print("!Error: need smaller kvcache")
         self.kvcache_bytes = kvcache_bytes
+        self.indexer_kvcache_bytes = indexer_kvcache_bytes
         self.target_bs = target_bs
 
     def print_flops_info(self):
@@ -133,11 +139,17 @@ class Model:
             self.config, self.args.use_fp8_gemm, self.args.use_fp8_kv
         )
         attn_core_time = attn.prefill_attn_core(
-            self.args.target_isl, self.kvcache_bytes, self.args.device_type
+            self.args.target_isl, self.kvcache_bytes, self.indexer_kvcache_bytes, self.args.device_type
         )
         attn_other_time = attn.prefill_attn_others(
             self.args.max_prefill_tokens, self.args.device_type
         )
+        if (attn.is_indexer):
+            indexer_other_time = attn.prefill_indexer_others(
+                self.args.max_prefill_tokens, 1, self.args.device_type
+            )
+            attn_other_time += indexer_other_time
+
         attn_core_time *= math.ceil(self.args.max_prefill_tokens / self.args.target_isl)
 
         moe = MoE(self.config, self.args.use_fp8_gemm)
@@ -191,11 +203,19 @@ class Model:
         )
         attn_core_time = attn.decode_attn_core(
             self.target_bs,
-            self.avg_context_len,
+            self.args.target_osl,
+            self.args.target_isl,
             self.kvcache_bytes,
+            self.indexer_kvcache_bytes,
             self.args.device_type,
         )
         attn_other_time = attn.decode_attn_others(self.target_bs, self.args.device_type)
+
+        if (attn.is_indexer):
+            indexer_other_time = attn.decode_indexer_others(
+                self.target_bs, 1, self.args.device_type
+            )
+            attn_other_time += indexer_other_time
 
         moe = MoE(self.config, self.args.use_fp8_gemm)
         moe_time, shared_expert_time = moe.decode_moe(

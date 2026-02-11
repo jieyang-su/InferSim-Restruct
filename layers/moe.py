@@ -76,7 +76,7 @@ class MoE:
             )
         )
         t = max(routed_experts_latency, moe_load_time)
-
+        s_t = 0.
         if self.config.num_shared_experts > 0:
             shared_expert_up_proj = get_gemm_mfu_and_latency(
                 m=bs,
@@ -170,7 +170,7 @@ class MoE:
             )
         )
         t = max(routed_experts_latency, moe_load_time)
-
+        s_t = 0.
         if self.config.num_shared_experts > 0:
             shared_expert_up_proj = get_gemm_mfu_and_latency(
                 m=seq_len,
