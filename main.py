@@ -3,6 +3,8 @@ import argparse
 from config.model_config import ModelConfig
 from models.hybrid_model import HybridModel
 from models.model import Model
+from report.export import dump_result_json
+import os
 
 
 def main(args):
@@ -19,15 +21,71 @@ def main(args):
         model = HybridModel(args, config)
     else:
         model = Model(args, config)
-    model.print_weights_info()
-    model.print_kvcache_info()
-    model.print_flops_info()
 
+    weights = model.print_weights_info()
+    kvcache = model.print_kvcache_info()
+    flops = model.print_flops_info()
+
+    prefill = None
     if not args.decode_only:
-        model.prefill()
+        prefill = model.prefill()
 
+    decode = None
     if not args.prefill_only:
-        model.decoding()
+        decode = model.decoding()
+
+    if args.output_json:
+        payload = {
+            "meta": {
+                "config_path": args.config_path,
+                "device_type": args.device_type,
+                "world_size": args.world_size,
+                "num_nodes": args.num_nodes,
+                "max_prefill_tokens": args.max_prefill_tokens,
+                "decode_bs": args.decode_bs,
+                "target_tgs": args.target_tgs,
+                "target_tpot_ms": args.target_tpot,
+                "target_isl": args.target_isl,
+                "target_osl": args.target_osl,
+                "use_fp8_gemm": bool(args.use_fp8_gemm),
+                "use_fp8_kv": bool(args.use_fp8_kv),
+                "enable_deepep": bool(args.enable_deepep),
+                "enable_tbo": bool(args.enable_tbo),
+                "sm_ratio": args.sm_ratio,
+                "prefill_only": bool(args.prefill_only),
+                "decode_only": bool(args.decode_only),
+            },
+            "model": {
+                "attn_type": getattr(config, "attn_type", None),
+                "model_name": getattr(config, "modelName", None),
+                "is_hybrid_linear": bool(getattr(config, "is_hybrid_linear", False)),
+            },
+            "weights": weights,
+            "kvcache": kvcache,
+            "flops": flops,
+            "prefill": prefill,
+            "decode": decode,
+        }
+        model_name = getattr(config, "modelName", "unknown")
+        mode = "prefill" if args.prefill_only else "decode"
+        if mode == "prefill":
+            filename = (
+                f"{model_name}_"
+                f"{mode}_"
+                f"i{args.target_isl}_"
+                f"o{args.target_osl}_"
+                f"mt{args.max_prefill_tokens}.json"
+            )
+        else:
+            filename = (
+                f"{model_name}_"
+                f"{mode}_"
+                f"i{args.target_isl}_"
+                f"o{args.target_osl}_"
+                f"bs{args.decode_bs}.json"
+            )
+        output_path = os.path.join(args.output_json, filename)
+        dump_result_json(output_path, payload)
 
 
 if __name__ == "__main__":
@@ -82,6 +140,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--decode-only", action="store_true", help="Only simulate decoding"
+    )
+    parser.add_argument(
+        "--output-json",
+        type=str,
+        default=None,
+        help="If set, export structured results to this JSON path (for golden tests).",
     )
     args = parser.parse_args()
     main(args)

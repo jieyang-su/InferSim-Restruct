@@ -42,6 +42,13 @@ class Model:
         )  # 15GB for runtime, 5GB for encoder
         print("{:<40} {:<10.2f}".format("Per GPU params size (GB):", params_per_gpu))
 
+        return {
+            "attn_params_mb": attn_params_bytes / 1024 / 1024,
+            "expert_params_mb": expert_params_bytes / 1024 / 1024,
+            "params_per_gpu_gb": params_per_gpu,
+            "kvcache_budget_gb": self.kvcache_mem,
+        }
+
     def print_kvcache_info(self):
         print("{s:{c}^{n}}".format(s="KV Cache", n=50, c="-"))
         print("{:<40} {:<10.2f}".format("KV cache space (GB):", self.kvcache_mem))
@@ -73,11 +80,23 @@ class Model:
                 "Current per-token KV cache size (KB):", (kvcache_bytes + indexer_kvcache_bytes) / 1024
             )
         )
-        if (kvcache_bytes+ indexer_kvcache_bytes) > target_kvcache_bytes:
+        if (kvcache_bytes + indexer_kvcache_bytes) > target_kvcache_bytes:
             print("!Error: need smaller kvcache")
         self.kvcache_bytes = kvcache_bytes
         self.indexer_kvcache_bytes = indexer_kvcache_bytes
         self.target_bs = target_bs
+
+        return {
+            "kvcache_budget_gb": self.kvcache_mem,
+            "input_seq_len": self.args.target_isl,
+            "output_seq_len": self.args.target_osl,
+            "context_len": context_len,
+            "target_decode_bs": target_bs,
+            "target_per_token_kv_kb": target_kvcache_bytes / 1024,
+            "current_per_token_kv_kb": (kvcache_bytes + indexer_kvcache_bytes) / 1024,
+            "kvcache_bytes_per_token": kvcache_bytes,
+            "indexer_kvcache_bytes_per_token": indexer_kvcache_bytes,
+        }
 
     def print_flops_info(self):
         print("{s:{c}^{n}}".format(s="FLOPs", n=50, c="-"))
@@ -85,7 +104,7 @@ class Model:
             "{:<40} {:<10}".format("Num hidden layers:", self.config.num_hidden_layers)
         )
         # per-token per-layer gflops
-        self.avg_context_len = int(self.args.target_isl + self.args.target_osl / 2)
+        self.avg_context_len = int(2 * self.args.target_isl + self.args.target_osl / 2)
         attn_core_gflops, other_gflops = get_attn_gflops(
             self.config, self.avg_context_len, absorb=True
         )
@@ -130,6 +149,23 @@ class Model:
             )
         )
 
+        return {
+            "num_hidden_layers": self.config.num_hidden_layers,
+            "avg_context_len": self.avg_context_len,
+            "per_token_per_layer_gflops": {
+                "attn_core": attn_core_gflops,
+                "moe_ffn": moe_gflops,
+                "others": other_gflops,
+            },
+            "per_token_gflops": {
+                "attn_core": attn_core_gflops * self.config.num_hidden_layers,
+                "moe_ffn": moe_gflops * self.config.num_hidden_layers,
+                "others": other_gflops * self.config.num_hidden_layers,
+                "total": (attn_core_gflops + moe_gflops + other_gflops)
+                * self.config.num_hidden_layers,
+            },
+        }
+
     def prefill(self):
         print("{s:{c}^{n}}".format(s="Prefilling", n=50, c="-"))
         print(
@@ -139,7 +175,10 @@ class Model:
             self.config, self.args.use_fp8_gemm, self.args.use_fp8_kv
         )
         attn_core_time = attn.prefill_attn_core(
-            self.args.target_isl, self.kvcache_bytes, self.indexer_kvcache_bytes, self.args.device_type
+            self.args.target_isl,
+            self.kvcache_bytes,
+            self.indexer_kvcache_bytes,
+            self.args.device_type,
         )
         attn_other_time = attn.prefill_attn_others(
             self.args.max_prefill_tokens, self.args.device_type
@@ -148,7 +187,8 @@ class Model:
             indexer_other_time = attn.prefill_indexer_others(
                 self.args.max_prefill_tokens, 1, self.args.device_type
             )
-            attn_other_time += indexer_other_time
+        else:
+            indexer_other_time = 0
 
         attn_core_time *= math.ceil(self.args.max_prefill_tokens / self.args.target_isl)
 
@@ -172,17 +212,23 @@ class Model:
         if self.args.enable_tbo:
             num_tokens *= 2
             ttft = max(
-                (attn_core_time + attn_other_time) / self.args.sm_ratio, comm_time1
+                (attn_core_time + attn_other_time + indexer_other_time) / self.args.sm_ratio, comm_time1
             )
             ttft += max(
-                (attn_core_time + attn_other_time) / self.args.sm_ratio, comm_time2
+                (attn_core_time + attn_other_time + indexer_other_time) / self.args.sm_ratio, comm_time2
             )
             ttft *= self.config.num_hidden_layers
-            ttft += max((moe_time + shared_expert_time) / self.args.sm_ratio, comm_time1 * self.config.num_hidden_layers)
-            ttft += max((moe_time + shared_expert_time) / self.args.sm_ratio, comm_time2 * self.config.num_hidden_layers)
+            ttft += max(
+                (moe_time + shared_expert_time) / self.args.sm_ratio,
+                comm_time1 * self.config.num_hidden_layers,
+            )
+            ttft += max(
+                (moe_time + shared_expert_time) / self.args.sm_ratio,
+                comm_time2 * self.config.num_hidden_layers,
+            )
         else:
             ttft = attn_core_time
-            ttft += attn_other_time
+            ttft += attn_other_time + indexer_other_time
             ttft += comm_time1 + comm_time2
             ttft *= self.config.num_hidden_layers
             ttft += moe_time + shared_expert_time
@@ -195,6 +241,25 @@ class Model:
                 "Throughput (TGS:tok/GPU/s):", num_tokens / (ttft / 1000)
             )
         )
+
+        return {
+            "max_prefill_tokens": self.args.max_prefill_tokens,
+            "num_tokens": num_tokens,
+            "attn_core_ms": attn_core_time * self.config.num_hidden_layers * 1000
+            if not self.args.enable_tbo
+            else None,
+            "attn_other_ms": attn_other_time * self.config.num_hidden_layers * 1000
+            if not self.args.enable_tbo
+            else None,
+            "moe_ms": moe_time * 1000,
+            "shared_expert_ms": shared_expert_time * 1000,
+            "comm_before_us": comm_time1 * 1e6,
+            "comm_after_us": comm_time2 * 1e6,
+            "enable_tbo": bool(self.args.enable_tbo),
+            "sm_ratio": self.args.sm_ratio if self.args.enable_tbo else None,
+            "ttft_ms": ttft,
+            "tgs_tok_per_gpu_s": num_tokens / (ttft / 1000),
+        }
 
     def decoding(self):
         print("{s:{c}^{n}}".format(s="Decoding", n=50, c="-"))
@@ -215,7 +280,8 @@ class Model:
             indexer_other_time = attn.decode_indexer_others(
                 self.target_bs, 1, self.args.device_type
             )
-            attn_other_time += indexer_other_time
+        else:
+            indexer_other_time = 0
 
         moe = MoE(self.config, self.args.use_fp8_gemm)
         moe_time, shared_expert_time = moe.decode_moe(
@@ -237,14 +303,14 @@ class Model:
         if self.args.enable_tbo:
             num_tokens *= 2
             temp_attn_core_time = attn_core_time  * self.config.num_hidden_layers
-            temp_attn_other_time = attn_other_time * self.config.num_hidden_layers
+            temp_attn_other_time = (attn_other_time + indexer_other_time) * self.config.num_hidden_layers
             temp_comm_time1 = comm_time1 * self.config.num_hidden_layers
             temp_comm_time2 = comm_time2 * self.config.num_hidden_layers
             tpot = max(temp_attn_other_time + shared_expert_time, temp_comm_time1) + max(temp_comm_time2, temp_attn_core_time + moe_time)
             tpot *= 2
         else:
             tpot = attn_core_time
-            tpot += attn_other_time
+            tpot += attn_other_time + indexer_other_time
             tpot += comm_time1 + comm_time2
             tpot *= self.config.num_hidden_layers
             tpot += moe_time + shared_expert_time
@@ -255,3 +321,15 @@ class Model:
         print("{:<40} {:<10.0f}".format("Throughput (TGS):", num_tokens / tpot * 1000))
         if tpot > self.args.target_tpot:
             print("!Error: TPOT > SLO, need smaller GFLOPs to speedup")
+
+        return {
+            "decode_bs": self.target_bs,
+            "num_tokens": num_tokens,
+            "comm_before_us": comm_time1 * 1e6,
+            "comm_after_us": comm_time2 * 1e6,
+            "enable_tbo": bool(self.args.enable_tbo),
+            "tpot_ms": tpot,
+            "tgs_tok_per_gpu_s": num_tokens / tpot * 1000,
+            "target_tpot_ms": self.args.target_tpot,
+            "slo_violation": bool(tpot > self.args.target_tpot),
+        }

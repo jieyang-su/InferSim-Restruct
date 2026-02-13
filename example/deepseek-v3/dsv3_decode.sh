@@ -64,7 +64,8 @@ python3 main.py --config-path hf_configs/deepseek_v3_config.json  \
   --enable-tbo  --target-osl 1786 \
   --decode-bs 64 \
   --decode-only \
-  --target-isl 4096
+  --target-isl 4096 \
+  --output-json ./output-json/ds
 
 python3 main.py --config-path hf_configs/deepseek_v3.2_config.json  \
   --device-type H800 \
@@ -73,4 +74,5 @@ python3 main.py --config-path hf_configs/deepseek_v3.2_config.json  \
   --enable-tbo  --target-osl 1786 \
   --decode-bs 64 \
   --decode-only \
-  --target-isl 4096
+  --target-isl 4096 \
+  --output-json ./output-json/ds

@@ -1,3 +1,4 @@
+# models/hybrid_model.py
 import math
 
 from comm.comm import Comm
@@ -7,8 +8,11 @@ from kvcache.kvcache import get_kvcache_size, get_states_size
 from layers.attn import create_attention
 from layers.linear_attn import create_linear_attn
 from layers.moe import MoE
-from params.params import (get_attn_params_size, get_expert_params_size,
-                           get_linear_attn_params_size)
+from params.params import (
+    get_attn_params_size,
+    get_expert_params_size,
+    get_linear_attn_params_size,
+)
 
 
 class HybridModel:
@@ -25,9 +29,7 @@ class HybridModel:
         linear_attn_params_bytes = get_linear_attn_params_size(
             self.config, self.args.use_fp8_gemm
         )
-        expert_params_bytes = get_expert_params_size(
-            self.config, self.args.use_fp8_gemm
-        )
+        expert_params_bytes = get_expert_params_size(self.config, self.args.use_fp8_gemm)
         print(
             "{:<40} {:<10.2f}".format(
                 "One full attn params size (MB):", full_attn_params_bytes / 1024 / 1024
@@ -53,10 +55,16 @@ class HybridModel:
         params_per_gpu += self.config.num_linear_attn_layers * full_attn_params_bytes
 
         params_per_gpu = params_per_gpu / 1024 / 1024 / 1024
-        self.kvcache_mem = (
-            self.gpu.mem - params_per_gpu - 15 - 5
-        )  # 15GB for runtime, 5GB for encoder
+        self.kvcache_mem = self.gpu.mem - params_per_gpu - 15 - 5
         print("{:<40} {:<10.2f}".format("Per GPU params size (GB):", params_per_gpu))
+
+        return {
+            "full_attn_params_mb": full_attn_params_bytes / 1024 / 1024,
+            "linear_attn_params_mb": linear_attn_params_bytes / 1024 / 1024,
+            "expert_params_mb": expert_params_bytes / 1024 / 1024,
+            "params_per_gpu_gb": params_per_gpu,
+            "kvcache_budget_gb": self.kvcache_mem,
+        }
 
     def print_kvcache_info(self):
         print("{s:{c}^{n}}".format(s="KV Cache", n=50, c="-"))
@@ -71,11 +79,9 @@ class HybridModel:
         print("{:<40} {:<10}".format("Output seq len:", self.args.target_osl))
         print("{:<40} {:<10}".format("Target decode batchsize:", target_bs))
         target_kvcache_bytes = self.kvcache_mem * 1024 * 1024 * 1024 / target_bs
-        kvcache_bytes = (
-            get_kvcache_size(self.config, self.args.use_fp8_kv)
-            / self.config.num_hidden_layers
-        )
+        kvcache_bytes = get_kvcache_size(self.config, self.args.use_fp8_kv) / self.config.num_hidden_layers
         kvcache_bytes *= self.config.num_full_attn_layers * context_len
+
         print(
             "{:<40} {:<10.2f}".format(
                 "Target per-req KV cache size (MB):", target_kvcache_bytes / 1024 / 1024
@@ -101,176 +107,135 @@ class HybridModel:
         )
         if kvcache_bytes + states_bytes > target_kvcache_bytes:
             print("!Error: need smaller kvcache")
+
         self.kvcache_bytes = kvcache_bytes / context_len
         self.states_bytes = states_bytes
         self.target_bs = target_bs
 
+        return {
+            "kvcache_budget_gb": self.kvcache_mem,
+            "input_seq_len": self.args.target_isl,
+            "output_seq_len": self.args.target_osl,
+            "context_len": context_len,
+            "target_decode_bs": target_bs,
+            "target_per_req_cache_mb": target_kvcache_bytes / 1024 / 1024,
+            "current_full_attn_kv_mb": kvcache_bytes / 1024 / 1024,
+            "current_states_mb": states_bytes / 1024 / 1024,
+            "current_total_cache_mb": (kvcache_bytes + states_bytes) / 1024 / 1024,
+            "kvcache_bytes_per_token": self.kvcache_bytes,
+            "states_bytes_per_req": states_bytes,
+        }
+
     def print_flops_info(self):
         print("{s:{c}^{n}}".format(s="FLOPs", n=50, c="-"))
-        print(
-            "{:<40} {:<10}".format("Num hidden layers:", self.config.num_hidden_layers)
-        )
-        # per-token per-layer gflops
+        print("{:<40} {:<10}".format("Num hidden layers:", self.config.num_hidden_layers))
         self.avg_context_len = int(self.args.target_isl + self.args.target_osl / 2)
-        attn_core_gflops, other_gflops = get_attn_gflops(
-            self.config, self.avg_context_len, absorb=True
-        )
+        attn_core_gflops, other_gflops = get_attn_gflops(self.config, self.avg_context_len, absorb=True)
         moe_gflops = get_moe_gflops(self.config)
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Per-token per-layer full attn core (GFLOPs):", attn_core_gflops
-            )
-        )
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Per-token per-layer MoE/FFN (GFLOPs):", moe_gflops
-            )
-        )
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Per-token per-layer others (GFLOPs):", other_gflops
-            )
-        )
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Per-token full attn core (GFLOPs):",
-                attn_core_gflops * self.config.num_full_attn_layers,
-            )
-        )
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Per-token MoE (GFLOPs):", moe_gflops * self.config.num_hidden_layers
-            )
-        )
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Per-token others (GFLOPs):",
-                other_gflops * self.config.num_hidden_layers,
-            )
-        )
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Per-token total (GFLOPs):",
-                (attn_core_gflops + moe_gflops + other_gflops)
-                * self.config.num_hidden_layers,
-            )
-        )
+
+        print("{:<40} {:<10.2f}".format("Per-token per-layer full attn core (GFLOPs):", attn_core_gflops))
+        print("{:<40} {:<10.2f}".format("Per-token per-layer MoE/FFN (GFLOPs):", moe_gflops))
+        print("{:<40} {:<10.2f}".format("Per-token per-layer others (GFLOPs):", other_gflops))
+        print("{:<40} {:<10.2f}".format("Per-token full attn core (GFLOPs):", attn_core_gflops * self.config.num_full_attn_layers))
+        print("{:<40} {:<10.2f}".format("Per-token MoE (GFLOPs):", moe_gflops * self.config.num_hidden_layers))
+        print("{:<40} {:<10.2f}".format("Per-token others (GFLOPs):", other_gflops * self.config.num_hidden_layers))
+        print("{:<40} {:<10.2f}".format("Per-token total (GFLOPs):", (attn_core_gflops + moe_gflops + other_gflops) * self.config.num_hidden_layers))
+
+        return {
+            "num_hidden_layers": self.config.num_hidden_layers,
+            "avg_context_len": self.avg_context_len,
+            "per_token_per_layer_gflops": {
+                "full_attn_core": attn_core_gflops,
+                "moe_ffn": moe_gflops,
+                "others": other_gflops,
+            },
+            "per_token_gflops": {
+                "full_attn_core": attn_core_gflops * self.config.num_full_attn_layers,
+                "moe_ffn": moe_gflops * self.config.num_hidden_layers,
+                "others": other_gflops * self.config.num_hidden_layers,
+                "total": (attn_core_gflops + moe_gflops + other_gflops) * self.config.num_hidden_layers,
+            },
+        }
 
     def prefill(self):
         print("{s:{c}^{n}}".format(s="Prefilling", n=50, c="-"))
-        print(
-            "{:<40} {:<10}".format("Max prefill tokens:", self.args.max_prefill_tokens)
-        )
-        # full attn
-        full_attn = create_attention(
-            self.config, self.args.use_fp8_gemm, self.args.use_fp8_kv
-        )
-        t_full_attn_core = full_attn.prefill_attn_core(
-            self.args.target_isl, self.kvcache_bytes, self.args.device_type
-        )
-        t_full_attn_others = full_attn.prefill_attn_others(
-            self.args.max_prefill_tokens, self.args.device_type
-        )
+        print("{:<40} {:<10}".format("Max prefill tokens:", self.args.max_prefill_tokens))
+
+        full_attn = create_attention(self.config, self.args.use_fp8_gemm, self.args.use_fp8_kv)
+        t_full_attn_core = full_attn.prefill_attn_core(self.args.target_isl, self.kvcache_bytes, self.args.device_type)
+        t_full_attn_others = full_attn.prefill_attn_others(self.args.max_prefill_tokens, self.args.device_type)
         t_full_attn_core *= self.args.max_prefill_tokens / self.args.target_isl
 
-        # linear attn
         linear_attn = create_linear_attn(self.config, self.args.use_fp8_gemm)
-        t_linear_attn_core = linear_attn.prefill_attn_core(
-            self.args.target_isl, self.states_bytes, self.args.device_type
-        )
+        t_linear_attn_core = linear_attn.prefill_attn_core(self.args.target_isl, self.states_bytes, self.args.device_type)
         t_linear_attn_core *= self.args.max_prefill_tokens / self.args.target_isl
-        t_linear_attn_others = linear_attn.prefill_attn_others(
-            self.args.max_prefill_tokens, self.args.device_type
-        )
+        t_linear_attn_others = linear_attn.prefill_attn_others(self.args.max_prefill_tokens, self.args.device_type)
 
-        # moe
         moe = MoE(self.config, self.args.use_fp8_gemm)
-        t_moe, t_shared_expert = moe.prefill_moe(
-            self.args.max_prefill_tokens, self.args.device_type, self.args.world_size
-        )
+        t_moe, t_shared_expert = moe.prefill_moe(self.args.max_prefill_tokens, self.args.device_type, self.args.world_size)
 
-        comm = Comm(
-            self.config,
-            self.gpu,
-            self.args.world_size,
-            self.args.num_nodes,
-            self.args.enable_deepep,
-        )
+        comm = Comm(self.config, self.gpu, self.args.world_size, self.args.num_nodes, self.args.enable_deepep)
         comm_t1, comm_t2 = comm.prefill_comm(self.args.max_prefill_tokens)
         print("{:<40} {:<10.2f}".format("Comm before MoE/FFN (us):", comm_t1 * 1e6))
         print("{:<40} {:<10.2f}".format("Comm after MoE/FFN (us):", comm_t2 * 1e6))
 
         num_tokens = self.args.max_prefill_tokens
-        ttft = (
-            t_full_attn_core + t_full_attn_others
-        ) * self.config.num_full_attn_layers
-        ttft += (
-            t_linear_attn_core + t_linear_attn_others
-        ) * self.config.num_linear_attn_layers
+        ttft = (t_full_attn_core + t_full_attn_others) * self.config.num_full_attn_layers
+        ttft += (t_linear_attn_core + t_linear_attn_others) * self.config.num_linear_attn_layers
         ttft += (comm_t1 + comm_t2) * self.config.num_hidden_layers + t_moe + t_shared_expert
-        ttft *= 1000  # convert to ms
-        ttft += 30  # for scheduler
+        ttft *= 1000
+        ttft += 30
 
         print("{:<40} {:<10.2f}".format("TTFT (ms):", ttft))
-        print(
-            "{:<40} {:<10.0f}".format(
-                "Throughput (TGS:tok/GPU/s):", num_tokens / (ttft / 1000)
-            )
-        )
+        print("{:<40} {:<10.0f}".format("Throughput (TGS:tok/GPU/s):", num_tokens / (ttft / 1000)))
+
+        return {
+            "max_prefill_tokens": self.args.max_prefill_tokens,
+            "num_tokens": num_tokens,
+            "comm_before_us": comm_t1 * 1e6,
+            "comm_after_us": comm_t2 * 1e6,
+            "ttft_ms": ttft,
+            "tgs_tok_per_gpu_s": num_tokens / (ttft / 1000),
+        }
 
     def decoding(self):
         print("{s:{c}^{n}}".format(s="Decoding", n=50, c="-"))
-        # full attn
-        full_attn = create_attention(
-            self.config, self.args.use_fp8_gemm, self.args.use_fp8_kv
-        )
-        t_full_attn_core = full_attn.decode_attn_core(
-            self.target_bs,
-            self.avg_context_len,
-            self.kvcache_bytes,
-            self.args.device_type,
-        )
-        t_full_attn_others = full_attn.decode_attn_others(
-            self.target_bs, self.args.device_type
-        )
 
-        # linear attn
+        full_attn = create_attention(self.config, self.args.use_fp8_gemm, self.args.use_fp8_kv)
+        t_full_attn_core = full_attn.decode_attn_core(self.target_bs, self.avg_context_len, self.kvcache_bytes, self.args.device_type)
+        t_full_attn_others = full_attn.decode_attn_others(self.target_bs, self.args.device_type)
+
         linear_attn = create_linear_attn(self.config, self.args.use_fp8_gemm)
-        t_linear_attn_core = linear_attn.decode_attn_core(
-            self.target_bs, self.states_bytes, self.args.device_type
-        )
-        t_linear_attn_others = linear_attn.decode_attn_others(
-            self.target_bs, self.args.device_type
-        )
+        t_linear_attn_core = linear_attn.decode_attn_core(self.target_bs, self.states_bytes, self.args.device_type)
+        t_linear_attn_others = linear_attn.decode_attn_others(self.target_bs, self.args.device_type)
 
         moe = MoE(self.config, self.args.use_fp8_gemm)
-        t_moe, t_shared_expert = moe.decode_moe(
-            self.target_bs, self.args.device_type, self.args.world_size
-        )
+        t_moe, t_shared_expert = moe.decode_moe(self.target_bs, self.args.device_type, self.args.world_size)
 
-        comm = Comm(
-            self.config,
-            self.gpu,
-            self.args.world_size,
-            self.args.num_nodes,
-            self.args.enable_deepep,
-        )
+        comm = Comm(self.config, self.gpu, self.args.world_size, self.args.num_nodes, self.args.enable_deepep)
         comm_t1, comm_t2 = comm.decode_comm(self.target_bs)
         print("{:<40} {:<10.2f}".format("Comm before MoE/FFN (us):", comm_t1 * 1e6))
         print("{:<40} {:<10.2f}".format("Comm after MoE/FFN (us):", comm_t2 * 1e6))
 
         num_tokens = self.target_bs
-        tpot = (
-            t_full_attn_core + t_full_attn_others
-        ) * self.config.num_full_attn_layers
-        tpot += (
-            t_linear_attn_core + t_linear_attn_others
-        ) * self.config.num_linear_attn_layers
+        tpot = (t_full_attn_core + t_full_attn_others) * self.config.num_full_attn_layers
+        tpot += (t_linear_attn_core + t_linear_attn_others) * self.config.num_linear_attn_layers
         tpot += (comm_t1 + comm_t2) * self.config.num_hidden_layers + t_moe + t_shared_expert
-        tpot *= 1000  # convert to ms
-        tpot += 5  # for scheduler
+        tpot *= 1000
+        tpot += 5
 
         print("{:<40} {:<10.2f}".format("TPOT (ms):", tpot))
         print("{:<40} {:<10.0f}".format("Throughput (TGS):", num_tokens / tpot * 1000))
         if tpot > self.args.target_tpot:
             print("!Error: TPOT > SLO, need smaller GFLOPs to speedup")
+
+        return {
+            "decode_bs": self.target_bs,
+            "num_tokens": num_tokens,
+            "comm_before_us": comm_t1 * 1e6,
+            "comm_after_us": comm_t2 * 1e6,
+            "tpot_ms": tpot,
+            "tgs_tok_per_gpu_s": num_tokens / tpot * 1000,
+            "target_tpot_ms": self.args.target_tpot,
+            "slo_violation": bool(tpot > self.args.target_tpot),
+        }
