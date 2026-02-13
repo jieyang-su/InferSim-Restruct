@@ -1,88 +1,78 @@
 import json
+from typing import Any, Dict, Optional
+
+from adapter.registry import select_adapter
+from spec.model_spec import ModelSpec
 
 
 class ModelConfig:
-    def __init__(
-        self,
-        config_path,
-    ):
-        d = dict()
+    """Backward-compatible wrapper around the new ModelSpec.
+
+    NOTE: New code should depend on ModelSpec directly (via adapter layer).
+    This class exists to keep the current simulator implementation working
+    while we incrementally move modules over to ModelSpec.
+    """
+
+    def __init__(self, config_path: str):
         with open(config_path, "r") as f:
-            d = json.load(f)
-        
-        self.modelPrefix = d["architectures"][0][:10]
-        self.modelName = d["architectures"][0]
-        self.hidden_size = d["hidden_size"]
-        self.num_hidden_layers = d["num_hidden_layers"]
+            d: Dict[str, Any] = json.load(f)
 
-        self.is_hybrid_linear = d.get("full_attention_interval") is not None
+        adapter = select_adapter(d)
+        self.spec: ModelSpec = adapter.parse(d)
+
+        # ---- Legacy attribute surface (used by existing modules) ----
+        self.modelPrefix = self.spec.model_prefix
+        self.modelName = self.spec.model_name
+
+        self.hidden_size = self.spec.hidden_size
+        self.num_hidden_layers = self.spec.num_hidden_layers
+
+        # Hybrid linear attn
+        self.is_hybrid_linear = self.spec.hybrid.enabled
         if self.is_hybrid_linear:
-            self.num_full_attn_layers = (
-                self.num_hidden_layers // d["full_attention_interval"]
-            )
-            self.num_linear_attn_layers = (
-                self.num_hidden_layers - self.num_full_attn_layers
-            )
-            self.linear_conv_kernel_dim = d["linear_conv_kernel_dim"]
-            self.linear_key_head_dim = d["linear_key_head_dim"]
-            self.linear_num_key_heads = d["linear_num_key_heads"]
-            self.linear_value_head_dim = d["linear_value_head_dim"]
-            self.linear_num_value_heads = d["linear_num_value_heads"]
-        
-        if d["architectures"][0] == "DeepseekV32ForCausalLM":
-            self.index_head_dim = d["index_head_dim"]
-            self.index_n_heads = d["index_n_heads"]
-            self.index_topk = d["index_topk"]
-            self.logits_dim = 4096
+            self.num_full_attn_layers = self.spec.hybrid.num_full_attn_layers
+            self.num_linear_attn_layers = self.spec.hybrid.num_linear_attn_layers
+            self.linear_conv_kernel_dim = self.spec.hybrid.linear_conv_kernel_dim
+            self.linear_key_head_dim = self.spec.hybrid.linear_key_head_dim
+            self.linear_num_key_heads = self.spec.hybrid.linear_num_key_heads
+            self.linear_value_head_dim = self.spec.hybrid.linear_value_head_dim
+            self.linear_num_value_heads = self.spec.hybrid.linear_num_value_heads
 
+        # Indexer (DeepSeek V3.2)
+        if self.spec.indexer.enabled:
+            self.index_head_dim = self.spec.indexer.index_head_dim
+            self.index_n_heads = self.spec.indexer.index_n_heads
+            self.index_topk = self.spec.indexer.index_topk
+            self.logits_dim = self.spec.indexer.logits_dim
 
-        self.attn_type = "MHA/GQA"
-        if "kv_lora_rank" in d:
-            self.attn_type = "MLA"
+        # Attention
+        self.attn_type = self.spec.attn.type
+        self.num_attention_heads = self.spec.attn.num_attention_heads
+        self.num_key_value_heads = self.spec.attn.num_key_value_heads
+        # for MLA, this "head_dim" is only used in a few places; keep a best-effort value
+        self.head_dim = self.spec.attn.head_dim
 
-        # attn
-        if self.attn_type == "MHA/GQA":
-            self.num_attention_heads = d["num_attention_heads"]
-            self.num_key_value_heads = d["num_key_value_heads"]
-            if "head_dim" in d:
-                self.head_dim = d["head_dim"]
-            else:
-                self.head_dim = self.hidden_size // self.num_attention_heads
-        elif self.attn_type == "MLA":
-            self.q_lora_rank = d["q_lora_rank"]
-            self.qk_nope_head_dim = d["qk_nope_head_dim"]
-            self.qk_rope_head_dim = d["qk_rope_head_dim"]
-            self.kv_lora_rank = d["kv_lora_rank"]
-            self.num_attention_heads = d["num_attention_heads"]
-            self.v_head_dim = d["v_head_dim"]
-            self.index_topk = d.get("index_topk")
-            self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        if self.attn_type == "MLA":
+            self.q_lora_rank = self.spec.attn.q_lora_rank
+            self.qk_nope_head_dim = self.spec.attn.qk_nope_head_dim
+            self.qk_rope_head_dim = self.spec.attn.qk_rope_head_dim
+            self.kv_lora_rank = self.spec.attn.kv_lora_rank
+            self.v_head_dim = self.spec.attn.v_head_dim
+            self.index_topk = getattr(self, "index_topk", None)
+            if self.qk_nope_head_dim is not None and self.qk_rope_head_dim is not None:
+                self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
-        # FFN/MoE
-        self.is_moe = True
-        if "num_routed_experts" in d:
-            self.num_routed_experts = d["num_routed_experts"]
-        elif "num_experts" in d:
-            self.num_routed_experts = d["num_experts"]
-        elif "n_routed_experts" in d:
-            self.num_routed_experts = d["n_routed_experts"]
-        else:
-            self.is_moe = False
-            self.num_routed_experts = 1
+        # FFN / MoE
+        self.is_moe = self.spec.moe.enabled
+        self.num_routed_experts = self.spec.moe.num_routed_experts
+        self.num_experts_per_tok = self.spec.moe.num_experts_per_tok
+        self.intermediate_size = self.spec.moe.intermediate_size
+        self.num_shared_experts = self.spec.moe.num_shared_experts
 
-        if self.is_moe:
-            self.num_experts_per_tok = d["num_experts_per_tok"]
-            self.intermediate_size = d["moe_intermediate_size"]
-            self.num_shared_experts = d.get("num_shared_experts", 0)
-            if (self.num_shared_experts == 0 ):
-                self.num_shared_experts = d.get("n_shared_experts", 0)
-            if (self.modelPrefix=="DeepseekV3"):
-                self.intermediate_size_ffn = d["intermediate_size"]
-                self.ffn_layers = 3
-                self.moe_layers = 58
-        else:
-            self.num_experts_per_tok = 1
-            self.intermediate_size = d["intermediate_size"]
-            self.num_shared_experts = 0
-            self.ffn_layers = None
-            self.moe_layers = None
+        # legacy DeepSeek V3 fields
+        if self.spec.moe.intermediate_size_ffn is not None:
+            self.intermediate_size_ffn = self.spec.moe.intermediate_size_ffn
+        if self.spec.moe.ffn_layers is not None:
+            self.ffn_layers = self.spec.moe.ffn_layers
+        if self.spec.moe.moe_layers is not None:
+            self.moe_layers = self.spec.moe.moe_layers
