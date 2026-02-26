@@ -1,8 +1,9 @@
 import argparse
 
 from config.model_config import ModelConfig
-from models.hybrid_model import HybridModel
-from models.model import Model
+from engine.sim_engine import SimConfig
+from engine.sim_engine import SimulationEngine
+from report.console import print_report
 from report.export import dump_result_json
 import os
 
@@ -10,62 +11,14 @@ import os
 def main(args):
     config = ModelConfig(args.config_path)
 
-    print("\n{s:{c}^{n}}".format(s=" Simulator Result ", n=50, c="="))
-    print("{:<40} {:<10}".format("Device type:", args.device_type))
-    print("{:<40} {:<10}".format("World size:", args.world_size))
-    print("{:<40} {:<10}".format("Attn type:", config.attn_type))
-    print("{:<40} {:<10}".format("Use FP8 GEMM:", args.use_fp8_gemm))
-    print("{:<40} {:<10}".format("Use FP8 KV:", args.use_fp8_kv))
+    sim = SimConfig.from_args(args)
+    engine = SimulationEngine(sim, config)
+    payload = engine.run(args.config_path)
 
-    if config.is_hybrid_linear:
-        model = HybridModel(args, config)
-    else:
-        model = Model(args, config)
-
-    weights = model.print_weights_info()
-    kvcache = model.print_kvcache_info()
-    flops = model.print_flops_info()
-
-    prefill = None
-    if not args.decode_only:
-        prefill = model.prefill()
-
-    decode = None
-    if not args.prefill_only:
-        decode = model.decoding()
+    # Console report is rendered from structured outputs.
+    print_report(payload)
 
     if args.output_json:
-        payload = {
-            "meta": {
-                "config_path": args.config_path,
-                "device_type": args.device_type,
-                "world_size": args.world_size,
-                "num_nodes": args.num_nodes,
-                "max_prefill_tokens": args.max_prefill_tokens,
-                "decode_bs": args.decode_bs,
-                "target_tgs": args.target_tgs,
-                "target_tpot_ms": args.target_tpot,
-                "target_isl": args.target_isl,
-                "target_osl": args.target_osl,
-                "use_fp8_gemm": bool(args.use_fp8_gemm),
-                "use_fp8_kv": bool(args.use_fp8_kv),
-                "enable_deepep": bool(args.enable_deepep),
-                "enable_tbo": bool(args.enable_tbo),
-                "sm_ratio": args.sm_ratio,
-                "prefill_only": bool(args.prefill_only),
-                "decode_only": bool(args.decode_only),
-            },
-            "model": {
-                "attn_type": getattr(config, "attn_type", None),
-                "model_name": getattr(config, "modelName", None),
-                "is_hybrid_linear": bool(getattr(config, "is_hybrid_linear", False)),
-            },
-            "weights": weights,
-            "kvcache": kvcache,
-            "flops": flops,
-            "prefill": prefill,
-            "decode": decode,
-        }
         model_name = getattr(config, "modelName", "unknown")
         mode = "prefill" if args.prefill_only else "decode"
         if mode == "prefill":
