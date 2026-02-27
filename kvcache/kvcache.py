@@ -27,7 +27,7 @@ def get_dsa_indexer_kvcache_size(config: ModelConfig, use_fp8):
 
 
 # interface 入口
-def get_kvcache_size(config: ModelConfig, use_fp8, is_indexer):
+def get_kvcache_size(config: ModelConfig, use_fp8, is_indexer: bool = False):
     if config.attn_type == "MHA/GQA":
         return get_mha_kvcache_size(config, use_fp8)
     elif config.attn_type == "MLA":

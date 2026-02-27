@@ -7,10 +7,9 @@ from typing import Any, Dict, Optional, Tuple
 from comm.comm import Comm
 from flops.flops import get_attn_gflops, get_moe_gflops
 from hardware.gpu import gpu_map
-from kvcache.kvcache import get_kvcache_size
-from layers.attn import create_attention
-from layers.linear_attn import create_linear_attn
-from layers.moe import MoE
+from ops.kv import KVCacheCalculator
+from ops.attn import AttentionFactory
+from ops.moe import MoESimulator
 from params.params import get_attn_params_size, get_expert_params_size
 from params.params import get_linear_attn_params_size
 from kvcache.kvcache import get_states_size
@@ -18,6 +17,7 @@ from kvcache.kvcache import get_states_size
 
 @dataclass(frozen=True)
 class SimConfig:
+
     device_type: str
     world_size: int
     num_nodes: int
@@ -113,7 +113,7 @@ class SimulationEngine:
 
             params_per_gpu_gb = params_per_gpu_bytes / 1024 / 1024 / 1024
 
-            kvcache_budget_gb = self.gpu.mem - params_per_gpu_gb - 15 - 5 # 15GB for runtime, 5GB for encoder
+            kvcache_budget_gb = self.gpu.mem - params_per_gpu_gb - 15 - 5
             self._kvcache_budget_gb = kvcache_budget_gb
 
             return {
@@ -135,7 +135,7 @@ class SimulationEngine:
             params_per_gpu_bytes / 1024 / 1024 / 1024
         ) * self.config.num_hidden_layers
 
-        # 15GB for runtime, 5GB for encoder
+        # 15GB runtime + 5GB encoder are empirical constants from legacy code.
         kvcache_budget_gb = self.gpu.mem - params_per_gpu_gb - 15 - 5
         self._kvcache_budget_gb = kvcache_budget_gb
 
@@ -163,7 +163,7 @@ class SimulationEngine:
             )
             # get_kvcache_size returns total kv bytes per layer; legacy divides by num_hidden_layers.
             full_attn_kv_bytes = (
-                get_kvcache_size(self.config, self.sim.use_fp8_kv) / self.config.num_hidden_layers
+                KVCacheCalculator.bytes_per_token(self.config, self.sim.use_fp8_kv, False) / self.config.num_hidden_layers
             )
             full_attn_kv_bytes *= self.config.num_full_attn_layers * context_len
             states_bytes = get_states_size(self.config)
@@ -193,14 +193,11 @@ class SimulationEngine:
             self._kvcache_budget_gb * 1024 * 1024 * 1024 / target_bs / context_len
         )
 
-        is_indexer = False
-        kvcache_bytes = get_kvcache_size(self.config, self.sim.use_fp8_kv, is_indexer)
+        # KV bytes-per-token (dtype-aware) + optional indexer KV.
+        kvcache_bytes = KVCacheCalculator.bytes_per_token(self.config, self.sim.use_fp8_kv, False)
         indexer_kvcache_bytes = 0
-        if getattr(self.config, "modelName", None) == "DeepseekV32ForCausalLM":
-            is_indexer = True
-            indexer_kvcache_bytes = get_kvcache_size(
-                self.config, self.sim.use_fp8_kv, is_indexer
-            )
+        if bool(getattr(self.config, "enable_indexer", False)) or getattr(self.config, "modelName", None) == "DeepseekV32ForCausalLM":
+            indexer_kvcache_bytes = KVCacheCalculator.bytes_per_token(self.config, self.sim.use_fp8_kv, True)
 
         self._kvcache_bytes_per_token = int(kvcache_bytes)
         self._indexer_kvcache_bytes_per_token = int(indexer_kvcache_bytes)
@@ -287,24 +284,26 @@ class SimulationEngine:
             # compute_kvcache stores per-token kv bytes for full-attn layers; compute states per-req.
             states_bytes = get_states_size(self.config)
 
-            full_attn = create_attention(self.config, self.sim.use_fp8_gemm, self.sim.use_fp8_kv)
-            t_full_core = full_attn.prefill_attn_core(
-                self.sim.target_isl, self._kvcache_bytes_per_token, 0, self.sim.device_type
+            full_attn = AttentionFactory.create(self.config, self.sim.use_fp8_gemm, self.sim.use_fp8_kv)
+            t_full_core, t_full_kv_load_time, _, _ = full_attn.prefill_attn_core(
+                self.sim.target_isl,
+                self._kvcache_bytes_per_token,
+                self._indexer_kvcache_bytes_per_token,
+                self.sim.device_type,
             )
             t_full_other = full_attn.prefill_attn_others(self.sim.max_prefill_tokens, self.sim.device_type)
-            t_full_core *= self.sim.max_prefill_tokens / self.sim.target_isl
+            t_full_core = max(t_full_core, t_full_kv_load_time)
+            t_full_core *= math.ceil(self.sim.max_prefill_tokens / self.sim.target_isl)
 
-            linear_attn = create_linear_attn(self.config, self.sim.use_fp8_gemm)
-            t_linear_core = linear_attn.prefill_attn_core(
-                self.sim.target_isl, states_bytes, self.sim.device_type
-            )
-            t_linear_core *= self.sim.max_prefill_tokens / self.sim.target_isl
-            t_linear_other = linear_attn.prefill_attn_others(self.sim.max_prefill_tokens, self.sim.device_type)
+            linear_attn = AttentionFactory.create_linear(self.config, self.sim.use_fp8_gemm)
+            lin_pref = linear_attn.prefill(self.sim.target_isl, self.sim.max_prefill_tokens, states_bytes, self.sim.device_type)
+            t_linear_core = lin_pref["core_s"]
+            t_linear_core *= math.ceil(self.sim.max_prefill_tokens / self.sim.target_isl)
+            t_linear_other = lin_pref["other_s"]
 
-            moe = MoE(self.config, self.sim.use_fp8_gemm)
-            t_moe, t_shared = moe.prefill_moe(
-                self.sim.max_prefill_tokens, self.sim.device_type, self.sim.world_size
-            )
+            moe = MoESimulator(self.config, self.sim.use_fp8_gemm)
+            moe_pref = moe.prefill(self.sim.max_prefill_tokens, self.sim.device_type, self.sim.world_size)
+            t_moe, t_shared = moe_pref["routed_s"], moe_pref["shared_s"]
 
             comm = self._build_comm()
             comm_before_s, comm_after_s = comm.prefill_comm(self.sim.max_prefill_tokens)
@@ -321,11 +320,13 @@ class SimulationEngine:
                 "breakdown": {
                     "full_attn_ms": (t_full_core + t_full_other) * self.config.num_full_attn_layers * 1000,
                     "linear_attn_ms": (t_linear_core + t_linear_other) * self.config.num_linear_attn_layers * 1000,
+                    "indexer_core_ms": None,
                     "moe_ms": t_moe * 1000,
                     "shared_expert_ms": t_shared * 1000,
                     "comm_before_us": comm_before_s * 1e6,
                     "comm_after_us": comm_after_s * 1e6,
-                    "kv_load_ms": None,
+                    "kv_load_ms": t_full_kv_load_time * self.config.num_full_attn_layers * 1000,
+                    "indexer_kv_load_ms": None,
                 },
                 "enable_tbo": False,
                 "sm_ratio": None,
@@ -334,8 +335,8 @@ class SimulationEngine:
                 "note": "hybrid_linear",
             }
 
-        attn = create_attention(self.config, self.sim.use_fp8_gemm, self.sim.use_fp8_kv)
-        attn_core_s = attn.prefill_attn_core(
+        attn = AttentionFactory.create(self.config, self.sim.use_fp8_gemm, self.sim.use_fp8_kv)
+        attn_core_s, attn_core_kv_load_time, indexer_core_s, indexer_core_kv_load_time = attn.prefill_attn_core(
             self.sim.target_isl,
             self._kvcache_bytes_per_token,
             self._indexer_kvcache_bytes_per_token,
@@ -350,9 +351,11 @@ class SimulationEngine:
             indexer_other_s = 0.0
 
         # prefill core time scales with number of chunks.
-        attn_core_s *= math.ceil(self.sim.max_prefill_tokens / self.sim.target_isl)
+        origin_attn_core_s = attn_core_s * math.ceil(self.sim.max_prefill_tokens / self.sim.target_isl)
+        core_s = max(attn_core_s, attn_core_kv_load_time) + max(indexer_core_s, indexer_core_kv_load_time)
+        core_s *= math.ceil(self.sim.max_prefill_tokens / self.sim.target_isl)
 
-        moe = MoE(self.config, self.sim.use_fp8_gemm)
+        moe = MoESimulator(self.config, self.sim.use_fp8_gemm)
         moe_s, shared_expert_s = moe.prefill_moe(
             self.sim.max_prefill_tokens, self.sim.device_type, self.sim.world_size
         )
@@ -365,11 +368,11 @@ class SimulationEngine:
             # Legacy rule: overlap two batches.
             num_tokens *= 2
             ttft_s = max(
-                (attn_core_s + attn_other_s + indexer_other_s) / self.sim.sm_ratio,
+                (core_s + attn_other_s + indexer_other_s) / self.sim.sm_ratio,
                 comm_before_s,
             )
             ttft_s += max(
-                (attn_core_s + attn_other_s + indexer_other_s) / self.sim.sm_ratio,
+                (core_s + attn_other_s + indexer_other_s) / self.sim.sm_ratio,
                 comm_after_s,
             )
             ttft_s *= self.config.num_hidden_layers
@@ -382,7 +385,7 @@ class SimulationEngine:
                 comm_after_s * self.config.num_hidden_layers,
             )
         else:
-            ttft_s = attn_core_s
+            ttft_s = core_s
             ttft_s += attn_other_s + indexer_other_s
             ttft_s += comm_before_s + comm_after_s
             ttft_s *= self.config.num_hidden_layers
@@ -395,19 +398,17 @@ class SimulationEngine:
             "max_prefill_tokens": self.sim.max_prefill_tokens,
             "num_tokens": num_tokens,
             "breakdown": {
-                "attn_core_ms": attn_core_s * self.config.num_hidden_layers * 1000
-                if not self.sim.enable_tbo
-                else None,
+                "attn_core_ms": origin_attn_core_s * self.config.num_hidden_layers * 1000,
+                "indexer_core_ms": indexer_core_s * self.config.num_hidden_layers * 1000,
                 "attn_other_ms": (attn_other_s + indexer_other_s)
                 * self.config.num_hidden_layers
-                * 1000
-                if not self.sim.enable_tbo
-                else None,
+                * 1000,
                 "moe_ms": moe_s * 1000,
                 "shared_expert_ms": shared_expert_s * 1000,
                 "comm_before_us": comm_before_s * 1e6,
                 "comm_after_us": comm_after_s * 1e6,
-                "kv_load_ms": None,
+                "kv_load_ms": attn_core_kv_load_time * self.config.num_hidden_layers * 1000,
+                "indexer_kv_load_ms": indexer_core_kv_load_time * self.config.num_hidden_layers * 1000,
             },
             "enable_tbo": bool(self.sim.enable_tbo),
             "sm_ratio": self.sim.sm_ratio if self.sim.enable_tbo else None,
@@ -425,17 +426,19 @@ class SimulationEngine:
             context_len = int(self.sim.target_isl + self.sim.target_osl / 2)
             states_bytes = get_states_size(self.config)
 
-            full_attn = create_attention(self.config, self.sim.use_fp8_gemm, self.sim.use_fp8_kv)
-            t_full_core = full_attn.decode_attn_core(
-                bs, context_len, self._kvcache_bytes_per_token, 0, self.sim.device_type
+            full_attn = AttentionFactory.create(self.config, self.sim.use_fp8_gemm, self.sim.use_fp8_kv)
+            t_full_core,t_full_core_kv_load_time, _, _ = full_attn.decode_attn_core(
+                bs, self.sim.target_osl, self.sim.target_isl, self._kvcache_bytes_per_token, self._indexer_kvcache_bytes_per_token, self.sim.device_type
             )
+            t_full_core = max(t_full_core, t_full_core_kv_load_time)
             t_full_other = full_attn.decode_attn_others(bs, self.sim.device_type)
 
-            linear_attn = create_linear_attn(self.config, self.sim.use_fp8_gemm)
-            t_linear_core = linear_attn.decode_attn_core(bs, states_bytes, self.sim.device_type)
-            t_linear_other = linear_attn.decode_attn_others(bs, self.sim.device_type)
+            linear_attn = AttentionFactory.create_linear(self.config, self.sim.use_fp8_gemm)
+            t_linear_dict = linear_attn.decode(bs, states_bytes, self.sim.device_type)
+            t_linear_core = t_linear_dict["core_s"]
+            t_linear_other = t_linear_dict["other_s"]
 
-            moe = MoE(self.config, self.sim.use_fp8_gemm)
+            moe = MoESimulator(self.config, self.sim.use_fp8_gemm)
             t_moe, t_shared = moe.decode_moe(bs, self.sim.device_type, self.sim.world_size)
 
             comm = self._build_comm()
@@ -453,11 +456,13 @@ class SimulationEngine:
                 "breakdown": {
                     "full_attn_ms": (t_full_core + t_full_other) * self.config.num_full_attn_layers * 1000,
                     "linear_attn_ms": (t_linear_core + t_linear_other) * self.config.num_linear_attn_layers * 1000,
+                    "indexer_core_ms": None,
                     "moe_ms": t_moe * 1000,
                     "shared_expert_ms": t_shared * 1000,
                     "comm_before_us": comm_before_s * 1e6,
                     "comm_after_us": comm_after_s * 1e6,
-                    "kv_load_ms": None,
+                    "kv_load_ms": t_full_core_kv_load_time * self.config.num_full_attn_layers * 1000,
+                    "indexer_kv_load_ms": None,
                 },
                 "enable_tbo": False,
                 "tpot_ms": tpot_ms,
@@ -468,8 +473,8 @@ class SimulationEngine:
             }
 
         bs = int(self._target_decode_bs)
-        attn = create_attention(self.config, self.sim.use_fp8_gemm, self.sim.use_fp8_kv)
-        attn_core_s = attn.decode_attn_core(
+        attn = AttentionFactory.create(self.config, self.sim.use_fp8_gemm, self.sim.use_fp8_kv)
+        attn_core_s, attn_core_kv_load_time, indexer_core_s, indexer_core_kv_load_time = attn.decode_attn_core(
             bs,
             self.sim.target_osl,
             self.sim.target_isl,
@@ -477,13 +482,14 @@ class SimulationEngine:
             self._indexer_kvcache_bytes_per_token,
             self.sim.device_type,
         )
+        core_s = max(attn_core_s, attn_core_kv_load_time) + max(indexer_core_s, indexer_core_kv_load_time)
         attn_other_s = attn.decode_attn_others(bs, self.sim.device_type)
         if getattr(attn, "is_indexer", False):
             indexer_other_s = attn.decode_indexer_others(bs, 1, self.sim.device_type)
         else:
             indexer_other_s = 0.0
 
-        moe = MoE(self.config, self.sim.use_fp8_gemm)
+        moe = MoESimulator(self.config, self.sim.use_fp8_gemm)
         moe_s, shared_expert_s = moe.decode_moe(bs, self.sim.device_type, self.sim.world_size)
 
         comm = self._build_comm()
@@ -492,7 +498,7 @@ class SimulationEngine:
         num_tokens = bs
         if self.sim.enable_tbo:
             num_tokens *= 2
-            temp_attn_core_s = attn_core_s * self.config.num_hidden_layers
+            temp_attn_core_s = core_s * self.config.num_hidden_layers
             temp_attn_other_s = (attn_other_s + indexer_other_s) * self.config.num_hidden_layers
             temp_comm_before_s = comm_before_s * self.config.num_hidden_layers
             temp_comm_after_s = comm_after_s * self.config.num_hidden_layers
@@ -501,7 +507,7 @@ class SimulationEngine:
             )
             tpot_s *= 2
         else:
-            tpot_s = attn_core_s
+            tpot_s = core_s
             tpot_s += attn_other_s + indexer_other_s
             tpot_s += comm_before_s + comm_after_s
             tpot_s *= self.config.num_hidden_layers
@@ -514,19 +520,17 @@ class SimulationEngine:
             "decode_bs": bs,
             "num_tokens": num_tokens,
             "breakdown": {
-                "attn_core_ms": attn_core_s * self.config.num_hidden_layers * 1000
-                if not self.sim.enable_tbo
-                else None,
+                "attn_core_ms": attn_core_s * self.config.num_hidden_layers * 1000,
+                "indexer_core_ms": indexer_core_s * self.config.num_hidden_layers * 1000,
                 "attn_other_ms": (attn_other_s + indexer_other_s)
                 * self.config.num_hidden_layers
-                * 1000
-                if not self.sim.enable_tbo
-                else None,
+                * 1000,
                 "moe_ms": moe_s * 1000,
                 "shared_expert_ms": shared_expert_s * 1000,
                 "comm_before_us": comm_before_s * 1e6,
                 "comm_after_us": comm_after_s * 1e6,
-                "kv_load_ms": None,
+                "kv_load_ms": attn_core_kv_load_time * self.config.num_hidden_layers * 1000,
+                "indexer_kv_load_ms": indexer_core_kv_load_time * self.config.num_hidden_layers * 1000,
             },
             "enable_tbo": bool(self.sim.enable_tbo),
             "tpot_ms": tpot_ms,

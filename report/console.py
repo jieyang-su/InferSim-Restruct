@@ -155,6 +155,41 @@ def print_report(payload: Dict[str, Any]) -> None:
         br = prefill.get("breakdown", {})
         print(
             "{:<40} {:<10}".format(
+                "attn_core_ms (ms):", _fmt_us(br.get("attn_core_ms"))
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "kv_load_time_ms (ms):", _fmt_us(br.get("kv_load_ms"))
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "indexer_core_ms (ms):", _fmt_us(br.get("indexer_core_ms"))
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "indexer_kv_load_time_ms (ms):", _fmt_us(br.get("indexer_kv_load_ms"))
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "attn_other_ms (ms):", _fmt_us(br.get("attn_other_ms"))
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "Routed_experts_ms (ms):", _fmt_us(br.get("moe_ms"))
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "Shared_experts_ms (ms):", _fmt_us(br.get("shared_expert_ms"))
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
                 "Comm before MoE/FFN (us):", _fmt_us(br.get("comm_before_us"))
             )
         )
@@ -174,6 +209,41 @@ def print_report(payload: Dict[str, Any]) -> None:
     if decode is not None:
         print(_banner("Decoding", "-"))
         br = decode.get("breakdown", {})
+        print(
+            "{:<40} {:<10}".format(
+                "attn_core_ms (ms):", _fmt_us(br.get("attn_core_ms"))
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "kv_load_time_ms (ms):", _fmt_us(br.get("kv_load_ms"))
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "indexer_core_ms (ms):", _fmt_us(br.get("indexer_core_ms"))
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "indexer_kv_load_time_ms (ms):", _fmt_us(br.get("indexer_kv_load_ms"))
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "attn_other_ms (ms):", _fmt_us(br.get("attn_other_ms"))
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "Routed_experts_ms (ms):", _fmt_us(br.get("moe_ms"))
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "Shared_experts_ms (ms):", _fmt_us(br.get("shared_expert_ms"))
+            )
+        )
         print(
             "{:<40} {:<10}".format(
                 "Comm before MoE/FFN (us):", _fmt_us(br.get("comm_before_us"))

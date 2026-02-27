@@ -1,0 +1,80 @@
+{
+  "meta": {
+    "config_path": "hf_configs/deepseek_v3.2_config.json",
+    "device_type": "H800",
+    "world_size": 128,
+    "num_nodes": 16,
+    "max_prefill_tokens": 4096,
+    "decode_bs": 64,
+    "target_tgs": 2560.0,
+    "target_tpot_ms": 50.0,
+    "target_isl": 4096,
+    "target_osl": 1786,
+    "use_fp8_gemm": true,
+    "use_fp8_kv": false,
+    "enable_deepep": true,
+    "enable_tbo": true,
+    "sm_ratio": 0.8181818181818182,
+    "prefill_only": false,
+    "decode_only": true
+  },
+  "model": {
+    "attn_type": "MLA",
+    "model_name": "DeepseekV32ForCausalLM",
+    "is_hybrid_linear": false
+  },
+  "weights": {
+    "attn_params_mb": 178.0,
+    "expert_params_mb": 42.0,
+    "params_per_gpu_gb": 18.109375,
+    "kvcache_budget_gb": 41.890625
+  },
+  "kvcache": {
+    "kvcache_budget_gb": 41.890625,
+    "input_seq_len": 4096,
+    "output_seq_len": 1786,
+    "context_len": 5882,
+    "target_decode_bs": 64,
+    "target_per_token_kv_kb": 116.68412104726283,
+    "current_per_token_kv_kb": 76.3095703125,
+    "kvcache_bytes_per_token": 70272,
+    "indexer_kvcache_bytes_per_token": 7869,
+    "budget_ok": true
+  },
+  "flops": {
+    "num_hidden_layers": 61,
+    "avg_context_len": 9085,
+    "per_token_per_layer_gflops": {
+      "attn_core": 2.53042688,
+      "moe_ffn": 0.792723456,
+      "others": 0.37421056
+    },
+    "per_token_gflops": {
+      "attn_core": 154.35603967999998,
+      "moe_ffn": 48.356130816000004,
+      "others": 22.82684416,
+      "total": 225.53901465599998
+    }
+  },
+  "prefill": null,
+  "decode": {
+    "decode_bs": 64,
+    "num_tokens": 128,
+    "breakdown": {
+      "attn_core_ms": 6.194182839402441,
+      "indexer_core_ms": 0.2249569739406627,
+      "attn_other_ms": 10.428406900156554,
+      "moe_ms": 1.823580994897959,
+      "shared_expert_ms": 1.6769076327075316,
+      "comm_before_us": 85.44921875,
+      "comm_after_us": 170.8984375,
+      "kv_load_ms": 7.615384138012766,
+      "indexer_kv_load_ms": 0.8527643696212214
+    },
+    "enable_tbo": true,
+    "tpot_ms": 50.06023844072817,
+    "tgs_tok_per_gpu_s": 2556.9195031212907,
+    "target_tpot_ms": 50.0,
+    "slo_violation": true
+  }
+}
