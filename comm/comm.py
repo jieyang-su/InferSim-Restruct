@@ -49,8 +49,14 @@ class Comm:
     ) -> float:
         return self._est.estimate(op=op, tensor=tensor, stage=stage, mode=mode)
 
+
+    def stage_comm(self, num_tokens: int, stage: str) -> Tuple[float, float]:
+        tensor_shape = [num_tokens, self.config.hidden_size]
+        before = self.estimate("stage_before", tensor_shape, stage=stage)
+        after = self.estimate("stage_after", tensor_shape, stage=stage)
+        return before, after
+
     def register_op(self, op: str, fn):
-        """SR_F_DS_COMM_0009: add new comm op without touching engine."""
         self._est.register_op(op, fn)
 
     # ----------- Legacy API (kept for compatibility) -----------
@@ -74,16 +80,3 @@ class Comm:
     def combine(self, num_tokens, mode="normal"):
         tensor_shape = [num_tokens, self.config.hidden_size]
         return self.estimate("combine", tensor_shape, mode=mode)
-
-    def prefill_comm(self, num_tokens: int):
-        if self.enable_deepep:
-            return self.dispatch(num_tokens, "normal"), self.combine(num_tokens, "normal")
-        return self.all_reduce(num_tokens), self.all_reduce(num_tokens)
-
-    def decode_comm(self, num_tokens: int):
-        if self.enable_deepep:
-            return (
-                self.dispatch(num_tokens, "low_latency"),
-                self.combine(num_tokens, "low_latency"),
-            )
-        return self.all_reduce(num_tokens), self.all_reduce(num_tokens)

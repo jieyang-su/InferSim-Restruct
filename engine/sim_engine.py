@@ -306,7 +306,7 @@ class SimulationEngine:
             t_moe, t_shared = moe_pref["routed_s"], moe_pref["shared_s"]
 
             comm = self._build_comm()
-            comm_before_s, comm_after_s = comm.prefill_comm(self.sim.max_prefill_tokens)
+            comm_before_s, comm_after_s = comm.stage_comm(self.sim.max_prefill_tokens, stage="prefill")
 
             ttft_s = (t_full_core + t_full_other) * self.config.num_full_attn_layers
             ttft_s += (t_linear_core + t_linear_other) * self.config.num_linear_attn_layers
@@ -361,7 +361,7 @@ class SimulationEngine:
         )
 
         comm = self._build_comm()
-        comm_before_s, comm_after_s = comm.prefill_comm(self.sim.max_prefill_tokens)
+        comm_before_s, comm_after_s = comm.stage_comm(self.sim.max_prefill_tokens, stage="prefill")
 
         num_tokens = self.sim.max_prefill_tokens
         if self.sim.enable_tbo:
@@ -442,7 +442,7 @@ class SimulationEngine:
             t_moe, t_shared = moe.decode_moe(bs, self.sim.device_type, self.sim.world_size)
 
             comm = self._build_comm()
-            comm_before_s, comm_after_s = comm.decode_comm(bs)
+            comm_before_s, comm_after_s = comm.stage_comm(bs, stage="decode")
 
             tpot_s = (t_full_core + t_full_other) * self.config.num_full_attn_layers
             tpot_s += (t_linear_core + t_linear_other) * self.config.num_linear_attn_layers
@@ -493,7 +493,7 @@ class SimulationEngine:
         moe_s, shared_expert_s = moe.decode_moe(bs, self.sim.device_type, self.sim.world_size)
 
         comm = self._build_comm()
-        comm_before_s, comm_after_s = comm.decode_comm(bs)
+        comm_before_s, comm_after_s = comm.stage_comm(bs, stage="decode")
 
         num_tokens = bs
         if self.sim.enable_tbo:
